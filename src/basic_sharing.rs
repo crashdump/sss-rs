@@ -188,7 +188,7 @@ pub(crate) fn from_secrets_compressed_inner<T: AsRef<[u8]>, U: AsRef<[u8]>>(
         let mut share_poly = GaloisPolynomial::new();
         share_poly.set_coeff(Coeff(*s), 0);
         for i in 1..(shares_required as usize) {
-            let curr_co = coeffs[(byte_idx * i) + i];
+            let curr_co = coeffs[byte_idx * (shares_required as usize - 1) + (i - 1)];
             share_poly.set_coeff(Coeff(curr_co), i);
         }
         for share_idx in 0..shares_to_create {
@@ -446,6 +446,66 @@ mod tests {
         let recon = reconstruct_secrets_compressed(&shares).unwrap();
 
         assert_eq!(secret, recon);
+    }
+
+    /// Each random coefficient must be used by at most one (byte, degree) pair. If a coefficient
+    /// is shared between bytes, fewer than `shares_required` shares can determine secret bytes.
+    #[test]
+    fn coefficients_are_not_shared_between_bytes() {
+        /// Fills every byte with zero except the one at `hot`, which is set to 1.
+        struct OneHotRng {
+            hot: usize,
+        }
+
+        impl rand::TryRng for OneHotRng {
+            type Error = std::convert::Infallible;
+
+            fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+                unimplemented!()
+            }
+
+            fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+                unimplemented!()
+            }
+
+            fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+                dst.fill(0);
+                dst[self.hot] = 1;
+                Ok(())
+            }
+        }
+
+        let secret_len = 17;
+        let secret = vec![0u8; secret_len];
+        for shares_required in 2..=8u8 {
+            let x_values: Vec<u8> = (1..=shares_required).collect();
+            let pool_len = secret_len * shares_required as usize;
+            let mut used_slots = 0;
+            for hot in 0..pool_len {
+                // With a zero secret and a single non-zero coefficient, a byte's shares are
+                // non-zero only if that byte's polynomial uses the coefficient.
+                let mut rng = OneHotRng { hot };
+                let shares = from_secrets_compressed_inner(
+                    &secret,
+                    shares_required,
+                    &x_values,
+                    Some(&mut rng),
+                )
+                .unwrap();
+                let users = (0..secret_len)
+                    .filter(|&byte_idx| shares[0][byte_idx + 1] != 0)
+                    .count();
+                assert!(
+                    users <= 1,
+                    "coefficient {} used by {} bytes (t={})",
+                    hot,
+                    users,
+                    shares_required
+                );
+                used_slots += users;
+            }
+            assert_eq!(used_slots, secret_len * (shares_required as usize - 1));
+        }
     }
 
     #[test]
