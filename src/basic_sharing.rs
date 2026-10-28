@@ -152,16 +152,18 @@ pub(crate) fn from_secrets_compressed_inner<T: AsRef<[u8]>, U: AsRef<[u8]>>(
         None => Box::new(rand::make_rng::<StdRng>()),
     };
 
+    // Each byte's polynomial needs one random coefficient per degree 1..shares_required.
+    let coeffs_len = secret.len() * (shares_required as usize).saturating_sub(1);
+
     // Pre-generate the coefficients together so we can avoid sending dyn Rng between threads.
-    // This is probably more efficient than the (secret.len() * shares_to_create) calls to rng.gen().
-    let mut coeffs: Vec<u8> = Vec::with_capacity(secret.len() * shares_to_create as usize);
+    // This is probably more efficient than the coeffs_len calls to rng.gen().
+    let mut coeffs: Vec<u8> = Vec::with_capacity(coeffs_len);
 
     // This is safe bc rng.fill() will write to every index and we are setting the len to the
     // exact capacity we set prior.
     //
-    // This is more efficient than doing secret.len() * shares_to_create loops of
-    // rng.gen().
-    unsafe { coeffs.set_len(secret.len() * shares_to_create as usize) };
+    // This is more efficient than doing coeffs_len loops of rng.gen().
+    unsafe { coeffs.set_len(coeffs_len) };
     rng.fill(coeffs.as_mut_slice());
 
     // Create the vecs for each share.
@@ -452,9 +454,11 @@ mod tests {
     /// is shared between bytes, fewer than `shares_required` shares can determine secret bytes.
     #[test]
     fn coefficients_are_not_shared_between_bytes() {
-        /// Fills every byte with zero except the one at `hot`, which is set to 1.
+        /// Fills every byte with zero except the one at `hot`, which is set to 1. Also checks
+        /// that exactly `len` coefficients are requested.
         struct OneHotRng {
             hot: usize,
+            len: usize,
         }
 
         impl rand::TryRng for OneHotRng {
@@ -469,6 +473,11 @@ mod tests {
             }
 
             fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+                assert_eq!(
+                    dst.len(),
+                    self.len,
+                    "wrong number of coefficients generated"
+                );
                 dst.fill(0);
                 dst[self.hot] = 1;
                 Ok(())
@@ -483,7 +492,7 @@ mod tests {
             for hot in 0..pool_len {
                 // With a zero secret and a single non-zero coefficient, a byte's shares are
                 // non-zero only if that byte's polynomial uses the coefficient.
-                let mut rng = OneHotRng { hot };
+                let mut rng = OneHotRng { hot, len: pool_len };
                 let shares = from_secrets_compressed_inner(
                     &secret,
                     shares_required,
